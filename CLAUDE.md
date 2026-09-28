@@ -39,7 +39,7 @@ BigQuery 접근에는 Application Default Credentials가 필요함 (`gcloud auth
 
 - **분석 기간은 `20201102`~`20210131`**이며 `_TABLE_SUFFIX BETWEEN`으로 적용함. 2020-11-01은 일요일이라 월요일 시작 주별 집계 기준에 포함되지 않으므로 의도적으로 제외한 것임.
 - **주별 버킷**: `DATE_TRUNC(PARSE_DATE('%Y%m%d', event_date), WEEK(MONDAY)) AS week_start`.
-- **신규 사용자 = `event_name = 'first_visit'`**, `COUNT(DISTINCT user_pseudo_id)`로 집계. 다만 `first_visit`은 이벤트 발생 건수가 고유 사용자 수보다 약 148건 많아 일부 중복이 존재한다는 점을 감안할 것.
+- **신규 사용자 = `event_name = 'first_visit'`**. `first_visit`은 이벤트 건수(255,516)가 고유 사용자(255,369)보다 147건 많으므로, **사용자별 가장 이른 1건만 남긴 뒤**(`ROW_NUMBER() OVER (PARTITION BY user_pseudo_id ORDER BY event_timestamp) = 1`) `COUNT(DISTINCT user_pseudo_id)`로 집계함. `COUNT(*)`나 중복 제거 없는 그룹별 `COUNT(DISTINCT)`를 쓰면 한 사용자가 여러 주·채널·기기·지역에 이중 집계되어 표마다 합계가 달라짐. 모든 신규 사용자 표의 합계는 255,369명으로 일치해야 함.
 - **채널 그룹핑**은 `traffic_source`에 `CASE`를 적용해 도출하며, `medium`을 기준으로 하되 `source` 예외 하나를 둠. 아래 매핑을 그대로 재사용할 것.
   - `medium = 'organic'` → Organic Search
   - `medium = 'cpc'` → Paid Search
@@ -52,10 +52,11 @@ BigQuery 접근에는 Application Default Credentials가 필요함 (`gcloud auth
 
 ## `get_grouped_counts()` 헬퍼
 
-`A(acquisition).ipynb` 안에서 정의되고, 이후 버그 수정본으로 재정의된 함수임. `group_col` 문자열을 SQL에 그대로 보간하고, `AS` 절 또는 마지막 점(dot) 세그먼트에서 결과 별칭을 도출한 뒤 합계 행을 붙임. 이 함수를 수정할 때 반드시 유지해야 할 두 가지:
+`A(acquisition).ipynb` 안에서 정의되고, 이후 버그 수정본으로 재정의된 함수임. `group_col` 문자열을 SQL에 그대로 보간하고, `AS` 절 또는 마지막 점(dot) 세그먼트에서 결과 별칭을 도출한 뒤 합계 행을 붙임. 이 함수를 수정할 때 반드시 유지해야 할 세 가지:
 
 1. `col == alias` 체크가 `is_numeric_dtype`보다 **먼저** 와야 함. 값이 전부 NULL인 그룹 컬럼은 pandas가 float64로 캐스팅하므로, 순서가 바뀌면 숫자 분기가 실행되어 `"Total"` 라벨이 `0`으로 덮어써짐.
 2. 노트북 로컬 함수이므로, 다른 노트북에서 쓰려면 정의를 복사해야 함. 공유 모듈은 없음.
+3. 내부 `base` CTE가 사용자별 가장 이른 이벤트 1건으로 중복 제거한 뒤 `COUNT(DISTINCT user_pseudo_id)`로 셈. `base`는 `device`, `geo`, `traffic_source` 구조체만 가져오므로 `group_col`은 이 세 구조체 안의 필드여야 함.
 
 ## 이미 검증 후 제외된 컬럼
 
@@ -68,7 +69,7 @@ BigQuery 접근에는 Application Default Credentials가 필요함 (`gcloud auth
 - `device.operating_system_version`, `device.web_info.browser_version` — 동일 버전이 표기 형식 차이로 여러 값으로 분열됨.
 - `device.language` — NaN 약 29%, 표기 형식 불일치.
 - `geo.metro`(100% `(not set)`), `geo.city`(41.6%), `geo.region`(9.4%).
-- `traffic_source.name`(캠페인) — 실제 UTM 캠페인명이 단 1건도 없고 GA4 자동 placeholder뿐이라, 캠페인 단위 분석과 CAC 산출이 이 데이터셋에서는 불가능함.
+- `traffic_source.name`(캠페인) — 실제 캠페인명이 단 1건도 없고 GA4 기본값(`(organic)` 등)과 난독화 대체값(`<Other>`, `(data deleted)`)뿐이라, 캠페인 단위 분석과 CAC 산출이 이 데이터셋에서는 불가능함. 원래 UTM이 없었는지 공개 과정에서 가려졌는지는 구분할 수 없으므로, 이를 해당 스토어의 트래킹 문제(비즈니스 문제)로 해석하지 말고 **데이터 한계**로만 서술할 것.
 
 **대신 채택된 컬럼**: `device.category`, `device.web_info.browser`, `geo.continent`, `geo.country`.
 
